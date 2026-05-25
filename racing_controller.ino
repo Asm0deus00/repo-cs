@@ -1,87 +1,78 @@
-#include <TM1637Display.h>
+using UnityEngine;
 
-// ── Pines ──────────────────────────────────────────────
-#define PIN_POT_STEER   A0
-#define PIN_POT_SPEED   A1
-#define PIN_POT_MENU    A2
-#define PIN_BTN_TURBO   2
-#define PIN_BTN_PAUSE   3
-#define CLK_DISPLAY     5
-#define DIO_DISPLAY     6
+[RequireComponent(typeof(Rigidbody))]
+public class CarController : MonoBehaviour
+{
+    [Header("Movement")]
+    public float maxSpeed       = 10f;
+    public float steerAngle     = 35f;
+    public float speedSmoothing = 4f;
 
-// ── Display ────────────────────────────────────────────
-TM1637Display display(CLK_DISPLAY, DIO_DISPLAY);
+    [Header("Turbo")]
+    public float turboMultiplier = 1.6f;
+    public float turboDuration   = 1.5f;
+    public float turboCooldown   = 3f;
 
-// ── Estado botones (detección de tap) ──────────────────
-bool lastTurbo = false;
-bool lastPause = false;
+    private Rigidbody _rb;
+    private float _currentSpeed;
+    private float _turboCharge  = 1f;
+    private bool  _turboActive  = false;
+    private float _turboTimer   = 0f;
 
-// ── Envío Serial ───────────────────────────────────────
-unsigned long lastSendTime = 0;
-const unsigned long SEND_INTERVAL = 20;       // ms
+    public float CurrentSpeedKmh => _currentSpeed * 3.6f;
+    public float TurboCharge     => _turboCharge;
+    public bool  TurboIsActive   => _turboActive;
 
-// ── Recepción Serial ───────────────────────────────────
-String serialBuffer = "";
-unsigned long lastDisplayUpdate = 0;
-const unsigned long DISPLAY_INTERVAL = 100;   // ms
-int displaySpeed = 0;
-
-// ── Setup ──────────────────────────────────────────────
-void setup() {
-  Serial.begin(115200);
-
-  pinMode(PIN_BTN_TURBO, INPUT);
-  pinMode(PIN_BTN_PAUSE, INPUT);
-
-  display.setBrightness(7);
-  display.showNumberDec(0, true);
-}
-
-// ── Loop ───────────────────────────────────────────────
-void loop() {
-  unsigned long now = millis();
-
-  // — Leer entradas —
-  int pot1 = analogRead(PIN_POT_STEER);
-  int pot2 = analogRead(PIN_POT_SPEED);
-  int pot3 = analogRead(PIN_POT_MENU);
-
-  bool turboNow = digitalRead(PIN_BTN_TURBO) == HIGH;
-  bool pauseNow = digitalRead(PIN_BTN_PAUSE) == HIGH;
-
-  // Detectar tap (flanco de subida)
-  int turboTap = (!lastTurbo && turboNow) ? 1 : 0;
-  int pauseTap = (!lastPause && pauseNow) ? 1 : 0;
-
-  lastTurbo = turboNow;
-  lastPause = pauseNow;
-
-  // — Enviar datos a Unity cada SEND_INTERVAL ms —
-  if (now - lastSendTime >= SEND_INTERVAL) {
-    lastSendTime = now;
-    Serial.print(pot1);     Serial.print(',');
-    Serial.print(pot2);     Serial.print(',');
-    Serial.print(pot3);     Serial.print(',');
-    Serial.print(turboTap); Serial.print(',');
-    Serial.println(pauseTap);
-  }
-
-  // — Recibir velocidad desde Unity —
-  while (Serial.available() > 0) {
-    char c = Serial.read();
-    if (c == '\n') {
-      int speed = serialBuffer.toInt();
-      speed = max(0, min(999, speed));   // clamp 0–999, nunca negativo
-      displaySpeed = speed;
-      serialBuffer = "";
-    } else {
-      serialBuffer += c;
+    void Awake()
+    {
+        _rb = GetComponent<Rigidbody>();
+        _rb.linearDamping = 5f;
+        _rb.angularDamping = 10f;
+        _rb.constraints = RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationZ;
     }
-  }
 
-  // — Actualizar display cada DISPLAY_INTERVAL ms —
-  if (now - lastDisplayUpdate >= DISPLAY_INTERVAL) {
-    lastDisplayUpdate = now;
-    display.showNumberDec(displaySpeed, false);
-  }
+    void FixedUpdate()
+    {
+        var input = ControllerInput.Instance;
+        if (input == null) return;
+
+        // ── Turbo ─────────────────────────────────────────
+        if (input.TurboTap && _turboCharge >= 1f && !_turboActive)
+        {
+            _turboActive = true;
+            _turboCharge = 0f;
+            _turboTimer  = turboDuration;
+        }
+
+        if (_turboActive)
+        {
+            _turboTimer -= Time.fixedDeltaTime;
+            if (_turboTimer <= 0f) _turboActive = false;
+        }
+        else if (_turboCharge < 1f)
+        {
+            _turboCharge += Time.fixedDeltaTime / turboCooldown;
+            _turboCharge  = Mathf.Clamp01(_turboCharge);
+        }
+
+        // ── Velocidad ─────────────────────────────────────
+        float mult        = _turboActive ? turboMultiplier : 1f;
+        float targetSpeed = input.Speed * maxSpeed * mult;
+        _currentSpeed     = Mathf.Lerp(_currentSpeed, targetSpeed, speedSmoothing * Time.fixedDeltaTime);
+
+        // ── Movimiento via velocity (respeta física) ──────
+        Vector3 vel    = transform.forward * _currentSpeed;
+        vel.y          = _rb.linearVelocity.y;
+        _rb.linearVelocity = vel;
+
+        // ── Steering ──────────────────────────────────────
+        if (_currentSpeed > 0.1f)
+        {
+            float turn = input.Steering * steerAngle * Time.fixedDeltaTime;
+            Quaternion rot = Quaternion.Euler(0f, turn, 0f);
+            _rb.MoveRotation(_rb.rotation * rot);
+        }
+
+        Debug.Log($"Steering: {Steering} | Speed: {Speed} | Turbo: {TurboTap} | Pause: {PauseTap}");
+    }
 }
